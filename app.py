@@ -153,7 +153,7 @@ def get_status_id(name):
 def get_snipeit_user_id(upn):
     if not upn:
         return None
-    r = requests.get(f"{SNIPEIT_URL}/users?email={upn}", headers=headers_snipeit)
+    r = requests.get(f"{SNIPEIT_URL}/users?username={upn}", headers=headers_snipeit)
     if r.status_code == 429:  # Too many requests
         print("Sleeping for 35s")
         time.sleep(35)
@@ -179,6 +179,8 @@ def fetch_managed_devices(platform):
         r.raise_for_status()
         data = r.json()
         for dev in data.get("value", []):
+            if not dev.get("serialNumber"):
+                continue  # Skip devices without a serial number
             os_val = dev.get("operatingSystem", "").lower()
             if platform == "all":
                 devices.append(dev)
@@ -194,10 +196,17 @@ def fetch_managed_devices(platform):
     return devices
 
 
-def send_to_snipeit(device, category_id, status_id, dry_run=False):
-    raw_upn = device.get("userPrincipalName")
-    upn = normalize_upn(raw_upn)
-    snipe_user_id = get_snipeit_user_id(upn)
+def get_or_create_device(device, category_id, status_id):
+    url = f'{SNIPEIT_URL}/hardware?filter={{"serial":"{device.get("serialNumber")}"}}'
+    r = requests.get(url, headers=headers_snipeit)
+    resp = r.json()
+    if r.status_code == 200 and resp.get("rows"):
+        d = resp["rows"][0]
+        if assigned_to := d.get("assigned_to"):
+            assigned_to_id = assigned_to.get("id")
+        else:
+            assigned_to_id = None
+        return d["id"], assigned_to_id
 
     man_name = device.get("manufacturer")
     mod_number = device.get("model")
@@ -219,29 +228,50 @@ def send_to_snipeit(device, category_id, status_id, dry_run=False):
         "phone_number": device.get("phoneNumber"),
     }
 
-    if dry_run:
-        print("[DRY RUN]", json.dumps(payload), "→ checkout to user_id", snipe_user_id)
-        return
-
     r = requests.post(f"{SNIPEIT_URL}/hardware", headers=headers_snipeit, json=payload)
     resp = r.json()
+
     if r.status_code not in (200, 201) or resp.get("status") != "success":
         print(
             f"[ERROR] Failed to create '{device.get('deviceName')}': {r.status_code} {r.text}"
         )
-        return
+        return None, None
+    else:
+        asset_id = resp["payload"]["id"]
+        print(f"Imported: {device.get('deviceName')} → asset ID {asset_id}")
+        return asset_id, None
 
-    asset_id = resp["payload"]["id"]
-    print(f"Imported: {device.get('deviceName')} → asset ID {asset_id}")
+
+def checkout_device(asset_id, device, assigned_to):
+    raw_upn = device.get("userPrincipalName")
+    upn = normalize_upn(raw_upn)
+    snipe_user_id = get_snipeit_user_id(upn)
 
     if snipe_user_id:
+        if assigned_to and assigned_to == snipe_user_id:
+            # The device is already checked out to the correct user, no action needed
+            return
+        elif assigned_to and assigned_to != snipe_user_id:
+            # The device is checked out to a different user, we need to check it in first
+            ci = requests.post(
+                f"{SNIPEIT_URL}/hardware/{asset_id}/checkin",
+                headers=headers_snipeit,
+                json={"note": "Checked in automatically by script to change assigned user."},
+            )
+            if ci.status_code not in (200, 201) or ci.json().get("status") != "success":
+                print(
+                    f"[ERROR] Checkin failed for asset {asset_id} before reassigning to user {snipe_user_id}: "
+                    f"{ci.status_code} {ci.text}"
+                )
+                return
+
         co = requests.post(
             f"{SNIPEIT_URL}/hardware/{asset_id}/checkout",
             headers=headers_snipeit,
             json={
                 "checkout_to_type": "user",
                 "assigned_user": snipe_user_id,
-                "note": "Assignment made automatically, via script from Jamf.",
+                "note": "Assignment made automatically, via script from Intune.",
             },
         )
         if co.status_code in (200, 201) and co.json().get("status") == "success":
@@ -282,6 +312,14 @@ def send_to_snipeit(device, category_id, status_id, dry_run=False):
                 print(
                     f"[ERROR] Checkout to location failed for asset {asset_id}: {co.status_code} {co.text}"
                 )
+
+def send_to_snipeit(device, category_id, status_id, dry_run=False):
+    asset_id, assigned_to = get_or_create_device(device, category_id, status_id)
+    if not asset_id:
+        return
+
+    checkout_device(asset_id, device, assigned_to)
+
 
 
 def get_category_name(device):
