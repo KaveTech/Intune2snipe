@@ -196,7 +196,7 @@ def fetch_managed_devices(platform):
     return devices
 
 
-def get_or_create_device(device, category_id, status_id):
+def get_or_create_device(device, status_id):
     url = f'{SNIPEIT_URL}/hardware?filter={{"serial":"{device.get("serialNumber")}"}}'
     r = requests.get(url, headers=headers_snipeit)
     resp = r.json()
@@ -210,6 +210,8 @@ def get_or_create_device(device, category_id, status_id):
 
     man_name = device.get("manufacturer")
     mod_number = device.get("model")
+    category_name = get_category_name(d)
+    category_id = get_or_create_category(category_name)
     man_id = get_or_create_manufacturer(man_name)
     mod_id = get_or_create_model(mod_number, man_id, category_id) if man_id else None
 
@@ -260,8 +262,8 @@ def checkout_device(asset_id, device, assigned_to):
             )
             if ci.status_code not in (200, 201) or ci.json().get("status") != "success":
                 print(
-                    f"[ERROR] Checkin failed for asset {asset_id} before reassigning to user {snipe_user_id}: "
-                    f"{ci.status_code} {ci.text}"
+                    f"[ERROR] Checkin failed for asset {asset_id}, serial: {device.get('serialNumber')} "
+                    f"before reassigning to user {snipe_user_id}: {ci.status_code} {ci.text}"
                 )
                 return
 
@@ -292,7 +294,8 @@ def checkout_device(asset_id, device, assigned_to):
             location_id = 3
         else:
             print(
-                f"[WARN] Asset {device.get('deviceName')} cannot be checked out. It doesn't have "
+                f"[WARN] Asset {device.get('deviceName')}, serial: {device.get('serialNumber')} "
+                f"cannot be checked out. It doesn't have "
                 f"user and location '{intune_category}' not found in Snipe-IT"
             )
 
@@ -309,12 +312,14 @@ def checkout_device(asset_id, device, assigned_to):
             if co.status_code in (200, 201) and co.json().get("status") == "success":
                 print(f"Checked out asset {asset_id} to location_id {location_id}")
             else:
+                device_serial = device.get("serialNumber")
                 print(
-                    f"[ERROR] Checkout to location failed for asset {asset_id}: {co.status_code} {co.text}"
+                    f"[ERROR] Checkout to location failed for asset {asset_id}, "
+                    f"serial: {device_serial}: {co.status_code} {co.text}"
                 )
 
-def send_to_snipeit(device, category_id, status_id, dry_run=False):
-    asset_id, assigned_to = get_or_create_device(device, category_id, status_id)
+def send_to_snipeit(device, status_id, dry_run=False):
+    asset_id, assigned_to = get_or_create_device(device, status_id)
     if not asset_id:
         return
 
@@ -342,10 +347,8 @@ def main(dry_run, platform):
     if status_id is None:
         sys.exit(1)
     for d in devices:
-        category_name = get_category_name(d)
-        category_id = get_or_create_category(category_name)
         send_to_snipeit(
-            d, category_id=category_id, status_id=status_id, dry_run=dry_run
+            d, status_id=status_id, dry_run=dry_run
         )
 
 
