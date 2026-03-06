@@ -210,7 +210,7 @@ def get_or_create_device(device, status_id):
 
     man_name = device.get("manufacturer")
     mod_number = device.get("model")
-    category_name = get_category_name(d)
+    category_name = get_category_name(device)
     category_id = get_or_create_category(category_name)
     man_id = get_or_create_manufacturer(man_name)
     mod_id = get_or_create_model(mod_number, man_id, category_id) if man_id else None
